@@ -1,0 +1,162 @@
+# ================================================================
+# 📘 YOLOv9 + MediaPipe Double-Body Detection (Offline Version)
+# Compatible with VSCode, Jupyter, and Colab
+# ================================================================
+
+import os
+import yaml
+import cv2
+import mediapipe as mp
+from ultralytics import YOLO
+
+# ================================================================
+# 1️⃣ SETUP PATHS & CONFIG
+# ================================================================
+
+# 🔧 Ganti path ke lokasi dataset kamu
+BASE_DIR = r"D:\Projects\DoubleBody"  # <-- ubah sesuai lokasi folder kamu
+DATASET_DIR = os.path.join(BASE_DIR, "doublebody_dataset")
+DATA_YAML_PATH = os.path.join(DATASET_DIR, "data.yaml")
+OUTPUT_DIR = os.path.join(BASE_DIR, "Output")
+
+# Cek struktur dataset
+for sub in ["train/images", "valid/images", "test/images"]:
+    if not os.path.exists(os.path.join(DATASET_DIR, sub)):
+        raise FileNotFoundError(f"❌ Folder {sub} tidak ditemukan di {DATASET_DIR}")
+
+# Buat file data.yaml kalau belum ada
+if not os.path.exists(DATA_YAML_PATH):
+    data_config = {
+        'train': os.path.join(DATASET_DIR, 'train', 'images'),
+        'val': os.path.join(DATASET_DIR, 'valid', 'images'),
+        'test': os.path.join(DATASET_DIR, 'test', 'images'),
+        'nc': 1,
+        'names': ['person']
+    }
+    with open(DATA_YAML_PATH, 'w') as f:
+        yaml.dump(data_config, f)
+    print(f"✅ File data.yaml dibuat di {DATA_YAML_PATH}")
+else:
+    print(f"ℹ️ File data.yaml sudah ada: {DATA_YAML_PATH}")
+
+# ================================================================
+# 2️⃣ TRAINING YOLOv9 (optional)
+# ================================================================
+
+def train_model():
+    """
+    Jalankan training YOLOv9 menggunakan dataset lokal.
+    """
+    model = YOLO('yolov9s.pt')
+    results = model.train(
+        data=DATA_YAML_PATH,
+        epochs=50,
+        imgsz=640,
+        batch=8,
+        name='yolov9_custom_person',
+        project=OUTPUT_DIR
+    )
+    print("✅ Training selesai! Model tersimpan di folder Output.")
+    return results
+
+
+# ================================================================
+# 3️⃣ LOAD MODEL YANG SUDAH DILATIH
+# ================================================================
+
+def load_trained_model():
+    model_path = os.path.join(OUTPUT_DIR, "yolov9_custom_person", "weights", "best.pt")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model {model_path} tidak ditemukan! Jalankan train_model() dulu.")
+    model = YOLO(model_path)
+    print("✅ Model terlatih berhasil dimuat.")
+    return model
+
+
+# ================================================================
+# 4️⃣ TES MODEL PADA SATU GAMBAR
+# ================================================================
+
+def test_single_image(yolo_model, test_image_path):
+    """
+    Jalankan inferensi YOLO pada satu gambar dan tampilkan hasil.
+    """
+    if not os.path.exists(test_image_path):
+        print(f"❌ Gambar tidak ditemukan: {test_image_path}")
+        return
+    results = yolo_model(test_image_path)
+    annotated = results[0].plot()
+    cv2.imshow("Hasil Deteksi YOLOv9", annotated)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+# ================================================================
+# 5️⃣ INTEGRASI MEDIAPIPE UNTUK ANALISIS POSE
+# ================================================================
+
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(static_image_mode=True, model_complexity=1, enable_segmentation=False)
+mp_drawing = mp.solutions.drawing_utils
+
+def analyze_persons(image_path, yolo_model):
+    """
+    Deteksi orang dengan YOLOv9, analisis pose dengan MediaPipe.
+    """
+    image = cv2.imread(image_path)
+    if image is None:
+        print(f"❌ Tidak bisa membaca gambar: {image_path}")
+        return None
+
+    results = yolo_model(image)
+    person_count = 0
+
+    for result in results:
+        for box in result.boxes:
+            if int(box.cls) == 0:
+                person_count += 1
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                crop = image[y1:y2, x1:x2]
+                rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                pose_results = pose.process(rgb_crop)
+
+                text = "Orientasi: Tidak Diketahui"
+                if pose_results.pose_landmarks:
+                    nose = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE]
+                    left_eye = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_EYE]
+                    right_eye = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_EYE]
+
+                    if nose.visibility > 0.5 and left_eye.visibility > 0.5 and right_eye.visibility > 0.5:
+                        text = "Menghadap Depan"
+                    else:
+                        text = "Menghadap Belakang/Samping"
+
+                    mp_drawing.draw_landmarks(crop, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+
+                cv2.putText(image, text, (x1, y2 + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+
+    if person_count > 1:
+        cv2.putText(image, f"WASPADA: {person_count} Orang!", (30, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+    else:
+        cv2.putText(image, f"Aman: {person_count} Orang", (30, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+    cv2.imshow("Analisis Double Body", image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+# ================================================================
+# 6️⃣ MAIN EKSEKUSI
+# ================================================================
+
+if __name__ == "__main__":
+    # Jalankan training jika belum punya model
+    # train_model()
+
+    model = load_trained_model()
+    test_image = os.path.join(DATASET_DIR, "test", "images", "gambar_test_1.jpg")  # ubah ke file test kamu
+    analyze_persons(test_image, model)
